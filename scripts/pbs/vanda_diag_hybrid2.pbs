@@ -1,0 +1,32 @@
+#!/bin/bash
+# Second hybrid-launch diagnostic (11/11): is it the nodes, or does the first
+# cross-node --map-by ...:PE=2 launch hang and poison later launches?
+# Order: known-good pure MPI first, then PE=2, then pure MPI again; then the
+# fallback (no mpirun binding, scripts/bind_rank.sh binds with hwloc).
+#PBS -N diag_hybrid2
+#PBS -P personal-CHANGEME
+#PBS -l select=2:ncpus=72:mpiprocs=72:mem=400gb
+#PBS -l place=scatter:excl
+#PBS -l walltime=00:12:00
+#PBS -j oe
+#PBS -k oed
+#PBS -r n
+cd "$PBS_O_WORKDIR"
+module load foss/2023b >/dev/null 2>&1
+source scripts/pbs/env_info.sh
+export LD_LIBRARY_PATH="/opt/pbs/lib:${LD_LIBRARY_PATH:-}"
+H="--hostfile $PBS_NODEFILE"
+P="./build/poisson_mpi --problem ones --repeat 1 --fixed-iters 5"
+try() { local name=$1; shift; echo "=== $(date +%T) $name"; local t0=$SECONDS
+    timeout --kill-after=5 30 "$@" 2>&1 | tail -n 3; echo "--- rc=${PIPESTATUS[0]} $(( SECONDS - t0 ))s"; }
+X="-x OMP_NUM_THREADS -x OMP_PLACES -x OMP_PROC_BIND"
+export OMP_PLACES=cores OMP_PROC_BIND=close
+OMP_NUM_THREADS=1 try "1 pure hostname ppr:72:node bind core" mpirun -np 144 $H --map-by ppr:72:node --bind-to core hostname
+OMP_NUM_THREADS=1 try "2 pure poisson 3D 64 ppr:72:node"      mpirun -np 144 $H --map-by ppr:72:node --bind-to core $X $P --dim 3 --n 64
+OMP_NUM_THREADS=1 try "3 hostname ppr:1:node bind core"        mpirun -np 2 $H --map-by ppr:1:node --bind-to core hostname
+OMP_NUM_THREADS=2 try "4 fallback bind_rank.sh 36x2/node poisson 3D 64" mpirun -np 72 $H --map-by ppr:36:node --bind-to none $X scripts/bind_rank.sh $P --dim 3 --n 64
+OMP_NUM_THREADS=2 try "5 fallback: bindings of 4 ranks"        mpirun -np 4 $H --map-by ppr:2:node --bind-to none $X scripts/bind_rank.sh sh -c 'echo $(hostname) lr=$OMPI_COMM_WORLD_LOCAL_RANK $(hwloc-bind --get) $(grep Cpus_allowed_list /proc/self/status)'
+OMP_NUM_THREADS=36 try "6 fallback 1x36... 2 ranks/node x 36"  mpirun -np 4 $H --map-by ppr:2:node --bind-to none $X scripts/bind_rank.sh $P --dim 3 --n 64
+OMP_NUM_THREADS=2 try "7 PE=2 hostname (suspect)"              mpirun -np 4 $H --map-by ppr:2:node:PE=2 --bind-to core hostname
+OMP_NUM_THREADS=1 try "8 pure hostname again"                  mpirun -np 144 $H --map-by ppr:72:node --bind-to core hostname
+OMP_NUM_THREADS=1 try "9 pure poisson again"                   mpirun -np 144 $H --map-by ppr:72:node --bind-to core $X $P --dim 3 --n 64

@@ -1,0 +1,25 @@
+#!/bin/bash
+# V2/V4 across FOUR exclusive Vanda CPU nodes (288 cores): p = 144, 256, 288.
+# Temporary solution files go to the shared home file system, because every
+# rank writes its part of the file with MPI-IO.
+# Submit from the project directory:  qsub scripts/pbs/vanda_validate_4node.pbs
+#PBS -N validate_4node
+#PBS -P personal-CHANGEME
+#PBS -l select=4:ncpus=72:mpiprocs=72:mem=400gb
+#PBS -l place=scatter:excl
+#PBS -l walltime=00:20:00
+#PBS -j oe
+#PBS -k oed
+#PBS -r n
+
+cd "$PBS_O_WORKDIR"
+module load foss/2023b Python/3.11.5-GCCcore-13.2.0 >/dev/null 2>&1
+source scripts/pbs/env_info.sh
+export LD_LIBRARY_PATH="/opt/pbs/lib:${LD_LIBRARY_PATH:-}"  # PBS (tm) launch of remote ranks
+export TMPDIR="$PBS_O_WORKDIR/tmp_$PBS_JOBID" && mkdir -p "$TMPDIR"
+
+python3 -u tests/v2_mpi_consistency.py --procs 144 256 288 --max-cores 288 --timeout 120 \
+    --launcher "mpirun -np {p} --map-by node --bind-to none" \
+    --out results/v2_mpi_vanda_4node.csv
+
+rm -rf "$TMPDIR"

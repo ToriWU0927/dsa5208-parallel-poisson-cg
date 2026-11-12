@@ -1,0 +1,17 @@
+#!/bin/bash
+# Generic scaling job on whole, exclusive Vanda CPU nodes. The node count and
+# the experiment are chosen at submission (scripts/pbs/submit_scaling.sh):
+#   qsub -v EXP=e2 -l select=4:ncpus=72:mpiprocs=72:mem=400gb scripts/pbs/vanda_scaling.pbs
+#PBS -N scaling
+#PBS -P personal-CHANGEME
+#PBS -l select=1:ncpus=72:mpiprocs=72:mem=400gb
+#PBS -l place=scatter:excl
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -k oed
+#PBS -r n
+
+cd "$PBS_O_WORKDIR"
+module load foss/2023b >/dev/null 2>&1
+source scripts/pbs/env_info.sh
+scripts/run_scaling.sh "${EXP:?set EXP with qsub -v EXP=...}"

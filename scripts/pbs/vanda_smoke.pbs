@@ -1,0 +1,23 @@
+#!/bin/bash
+# Short calibration run on exclusive Vanda CPU nodes before the real sweeps
+# (1 node by default; 2 nodes: qsub -l select=2:ncpus=72:mpiprocs=72:mem=400gb):
+# checks every launch configuration (pure MPI, MPI+OpenMP, all variants) and
+# measures time per iteration, to fix problem sizes and walltimes.
+# 10 iterations, 1 repetition; results/smoke/smoke_<exp>_n<nodes>.csv are not used in the report.
+#PBS -N smoke
+#PBS -P personal-CHANGEME
+#PBS -l select=1:ncpus=72:mpiprocs=72:mem=400gb
+#PBS -l place=scatter:excl
+#PBS -l walltime=00:30:00
+#PBS -j oe
+#PBS -k oed
+#PBS -r n
+
+cd "$PBS_O_WORKDIR"
+module load foss/2023b >/dev/null 2>&1
+source scripts/pbs/env_info.sh
+NODES=$(sort -u "$PBS_NODEFILE" | wc -l)
+mkdir -p results/smoke
+for e in ${EXPS:-e2 e3 e5 e6}; do   # subset: qsub -v EXPS="e6"
+    ITERS=10 REPEAT=1 OUT="results/smoke/smoke_${e}_n${NODES}.csv" scripts/run_scaling.sh "$e"
+done

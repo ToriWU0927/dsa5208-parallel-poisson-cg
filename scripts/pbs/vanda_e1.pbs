@@ -1,0 +1,19 @@
+#!/bin/bash
+# E1 serial scaling (R2) on ONE exclusive Vanda CPU node (same node type and
+# compiler as the MPI runs). Time per iteration: 3 repetitions; time to
+# solution: 1 repetition (runs of several minutes vary little; saves ~80
+# core-hours). Every configuration is time-limited (RUN_TIMEOUT, default 840 s).
+# Output: results/e1_serial_vanda.csv
+#PBS -N e1
+#PBS -P personal-CHANGEME
+#PBS -l select=1:ncpus=72:mpiprocs=72:mem=400gb
+#PBS -l place=scatter:excl
+#PBS -l walltime=01:40:00
+#PBS -j oe
+#PBS -k oed
+#PBS -r n
+
+cd "$PBS_O_WORKDIR"
+module load foss/2023b >/dev/null 2>&1
+source scripts/pbs/env_info.sh
+REPEAT=3 SOLVE_REPEAT=1 scripts/run_e1_serial.sh results/e1_serial_vanda.csv

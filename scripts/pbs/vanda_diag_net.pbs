@@ -1,0 +1,48 @@
+#!/bin/bash
+# Inter-node MPI diagnosis on 2 Vanda nodes. Every attempt runs under a 45 s
+# time limit so a hang costs at most 45 s.
+# 11/11 round 1: default / UCX / TCP all failed with 144 ranks over ssh launch;
+# Open MPI could not load its PBS launcher (libpbs.so.0 not found), so remote
+# ranks are started by ssh, possibly outside the job's cpuset. Round 2 tests:
+#   - where remote ranks may run (allowed CPUs) with ssh launch vs PBS (tm) launch
+#   - tm launch with libpbs on LD_LIBRARY_PATH
+#PBS -N diag_net
+#PBS -P personal-CHANGEME
+#PBS -l select=2:ncpus=72:mpiprocs=72
+#PBS -l place=scatter:excl
+#PBS -l walltime=00:12:00
+#PBS -j oe
+#PBS -k oed
+#PBS -r n
+
+cd "$PBS_O_WORKDIR"
+module load foss/2023b >/dev/null 2>&1
+echo "nodes: $(sort -u $PBS_NODEFILE | tr '\n' ' ')"
+echo "libpbs: $(ls /opt/pbs/lib*/libpbs.so* 2>/dev/null | tr '\n' ' ')"
+PBSLIB=$(dirname "$(ls /opt/pbs/lib*/libpbs.so.0 2>/dev/null | head -1)" 2>/dev/null)
+
+B="./build/poisson_mpi --dim 2 --n 97 --problem mms --tol 1e-12 --repeat 1"
+cpus='echo "$(hostname) rank=$OMPI_COMM_WORLD_RANK $(grep Cpus_allowed_list /proc/self/status)"'
+try() {  # try LABEL NP LAUNCHER-OPTIONS...  (prints result or the last error lines)
+    local label=$1 np=$2; shift 2
+    local s=$SECONDS out
+    out=$(timeout --kill-after=10 45 mpirun -np $np "$@" $B 2>&1)
+    local res=$(echo "$out" | grep -E "^mpi," | cut -d, -f11,12,14,21,24)
+    echo "[$label] np=$np wall=$(( SECONDS - s ))s ${res:-NO RESULT}"
+    [[ -z $res ]] && echo "$out" | grep -vE "mca_base_component|^\s*$|Permanently added" | tail -4 | sed 's/^/      /'
+}
+SSH="--hostfile $PBS_NODEFILE"
+
+echo "=== allowed CPUs, ssh launch (4 ranks, 2 per node)"
+timeout 30 mpirun -np 4 $SSH --map-by node --bind-to none bash -c "$cpus" 2>&1 | grep rank= | sort
+try ssh-72x2-bycore 144 $SSH --map-by core --bind-to core
+try ssh-4           4   $SSH --map-by node --bind-to none
+
+if [[ -n $PBSLIB ]]; then
+    export LD_LIBRARY_PATH=$PBSLIB:$LD_LIBRARY_PATH
+    echo "=== with $PBSLIB on LD_LIBRARY_PATH (PBS tm launch)"
+    timeout 30 mpirun -np 4 --map-by node --bind-to none bash -c "$cpus" 2>&1 | grep -E "rank=|tm" | sort
+    try tm-4            4   --map-by node --bind-to none
+    try tm-144          144 --map-by core --bind-to core
+    try tm-144-ucx      144 --map-by core --bind-to core --mca pml ucx
+fi

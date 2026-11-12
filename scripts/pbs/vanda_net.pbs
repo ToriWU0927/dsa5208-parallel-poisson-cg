@@ -1,0 +1,32 @@
+#!/bin/bash
+# Network parameters for the communication model (E4): ping-pong latency and
+# bandwidth within one node and between two nodes, and small-allreduce latency
+# for 2 ... 144 ranks. Every run is time-limited (45 s).
+# Output: results/net_vanda.csv
+#PBS -N net
+#PBS -P personal-CHANGEME
+#PBS -l select=2:ncpus=72:mpiprocs=72
+#PBS -l place=scatter:excl
+#PBS -l walltime=00:10:00
+#PBS -j oe
+#PBS -k oed
+#PBS -r n
+
+cd "$PBS_O_WORKDIR"
+module load foss/2023b >/dev/null 2>&1
+source scripts/pbs/env_info.sh
+export LD_LIBRARY_PATH="/opt/pbs/lib:${LD_LIBRARY_PATH:-}"  # PBS (tm) launch of remote ranks
+OUT=results/net_vanda.csv
+T="timeout --kill-after=10 45"
+
+echo "--- ping-pong, same node"
+$T mpirun -np 2 --map-by ppr:2:node --bind-to core ./build/pingpong | tee $OUT
+echo "--- ping-pong, two nodes"
+$T mpirun -np 2 --map-by ppr:1:node --bind-to core ./build/pingpong | tail -n +2 | tee -a $OUT
+for p in 4 16 72 144; do
+    echo "--- allreduce, $p ranks"
+    $T mpirun -np $p --map-by node --bind-to core ./build/pingpong 8 | grep allreduce | tee -a $OUT
+done
+echo "--- poisson 2D n=97, 4 ranks over 2 nodes (was 48 ms/iteration with --bind-to none)"
+$T mpirun -np 4 --map-by node --bind-to core ./build/poisson_mpi --dim 2 --n 97 --tol 1e-12 --repeat 2 \
+    | cut -d, -f11,12,14,21,24,25,26,27

@@ -1,0 +1,25 @@
+# build
+build/
+*.o
+# Python
+__pycache__/
+*.pyc
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+*.swp
+# raw job output and logs (not part of the submission)
+*.log
+*.o[0-9]*
+*.e[0-9]*
+results/logs/
+nohup.out
+# job temp dirs (TMPDIR=tmp_$PBS_JOBID) and --save solution dumps
+tmp_*/
+*.bin
+# data not used in the report
+results/*local*.csv
+results/e6_vanda_n1_aborted.csv
+# internal planning notes (cluster account, quota, schedule)
+需求分析.md

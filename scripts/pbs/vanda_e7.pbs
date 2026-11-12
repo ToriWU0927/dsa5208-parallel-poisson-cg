@@ -1,0 +1,87 @@
+#!/bin/bash
+# E7: MPI + CUDA performance on ONE Vanda GPU node (2 x A40 by default; 1 GPU:
+#   qsub -N e7_g1 -l select=1:ncpus=36:ngpus=1:mpiprocs=8:mem=240gb scripts/pbs/vanda_e7.pbs)
+#   0. (2 GPUs only) V3 correctness check MPI+CUDA vs serial first; abort if it fails
+#   1. size sweep on 1 GPU: time per iteration vs N (GPU efficiency at small sizes)
+#   2. strong scaling p = 1..#GPUs: 3D n = 512, 2D n = 16384, and 2D n = 8192 (same sizes as E2 on CPU)
+#   3. weak scaling p = 1..#GPUs: 256^3 (3D) / 8192^2 (2D) per GPU
+#   p >= 2: CUDA-aware MPI (--gpu-aware 1) and host staging (--gpu-aware 0)
+# 200 fixed CG iterations, 3 repetitions per configuration (as E2 / E3).
+# Output: results/e7_vanda_g<GPUs>_<jobid>.csv (and results/v3_cuda_vanda_g<GPUs>_<jobid>.csv)
+# Every job builds in its own directory (build/job_<jobid>), so jobs can run at the same time.
+# Vanda rewrites every GPU chunk to 36 cores + 240 GB (one vnode), so smaller requests do not help.
+#PBS -N e7
+#PBS -P personal-CHANGEME
+#PBS -l select=2:ncpus=36:ngpus=1:mpiprocs=4:mem=240gb
+#PBS -l place=pack
+#PBS -l walltime=00:30:00
+#PBS -j oe
+#PBS -k oed
+#PBS -r n
+
+cd "$PBS_O_WORKDIR"
+module load nvhpc-hpcx-cuda12/26.1 >/dev/null 2>&1
+source scripts/pbs/env_info.sh
+echo "--- GPU topology"; nvidia-smi topo -m
+NG=$(nvidia-smi -L | wc -l)
+JID=${PBS_JOBID%%.*}
+B=build/job_$JID                       # private build directory of this job
+TAG=g${NG}_$JID
+echo "--- job $JID: $NG GPU(s), build dir $B, result tag $TAG"
+NVCC=$(dirname "$(which nvc++)")/../../cuda/12.9/bin/nvcc   # CUDA 12.9 (driver supports <= 12.9)
+# (no "make | grep || exit": the exit status of a pipeline is that of its last command)
+mkdir -p build
+make cuda BUILD=$B NVCC="$NVCC" > $B.make.log 2>&1 || { cat $B.make.log; echo "build failed"; exit 1; }
+grep -v '^mkdir' $B.make.log; rm -f $B.make.log
+T="timeout --kill-after=10"
+EXE=./$B/poisson_mpi_cuda
+
+if [ "$NG" -ge 2 ]; then
+    echo "--- V3 on $NG GPUs"
+    module load Python/3.11.5-GCCcore-13.2.0 >/dev/null 2>&1
+    make serial BUILD=$B CXX=g++ > $B.make.log 2>&1 || { cat $B.make.log; echo "serial build failed"; exit 1; }
+    rm -f $B.make.log
+    export TMPDIR="$PBS_O_WORKDIR/tmp_$PBS_JOBID" && mkdir -p "$TMPDIR"
+    python3 -u tests/v2_mpi_consistency.py --variant-set cuda --mpi $EXE --serial $B/poisson_serial \
+        --procs 1 2 3 4 8 --launcher "mpirun -np {p} --oversubscribe --bind-to none" \
+        --timeout 120 --out results/v3_cuda_vanda_${TAG}.csv \
+        | tee v3_$JID.log   # all lines: the watchdog kills a job without output for 15 min
+    rm -rf "$TMPDIR"
+    grep -q "OVERALL: PASS" v3_$JID.log || { echo "V3 failed, E7 not run"; exit 4; }
+    rm -f v3_$JID.log
+fi
+
+OUT=results/e7_vanda_${TAG}.csv
+# (always through mpirun and time-limited: a singleton start of the HPC-X MPI hangs, Vanda 11/11)
+$T 60 mpirun -np 1 --bind-to none $EXE --dim 2 --n 8 --repeat 1 --header \
+    > $OUT.tmp || { echo "header run failed, aborting"; exit 3; }
+head -1 $OUT.tmp > $OUT; rm -f $OUT.tmp
+# one configuration; a timeout aborts the job (a hang is usually systematic)
+run() {  # run P AWARE options...
+    local p=$1 aw=$2; shift 2
+    echo "  $(date +%T) p=$p aware=$aw $*"
+    $T 300 mpirun -np $p --bind-to none $EXE --problem ones --fixed-iters 200 --repeat 3 \
+        --gpu-aware $aw "$@" >> $OUT
+    local rc=$?
+    [ $rc -eq 124 ] || [ $rc -eq 137 ] && { echo "timeout -> aborting"; exit 5; }
+    [ $rc -ne 0 ] && echo "  (rc=$rc, skipped)"
+    return 0
+}
+
+echo "--- E7 size sweep (1 GPU)"
+for n in 32 64 128 192 256 384; do run 1 1 --dim 3 --n $n; done
+for n in 512 1024 2048 4096; do run 1 1 --dim 2 --n $n; done
+
+echo "--- E7 strong and weak scaling"
+for p in $(seq 1 $NG); do
+    awl="1"; [ $p -ge 2 ] && awl="1 0"      # one GPU: no halo messages, aware / staging identical
+    for aw in $awl; do
+        run $p $aw --dim 3 --n 512
+        run $p $aw --dim 2 --n 16384
+        run $p $aw --dim 2 --n 8192
+        [ $p -ge 2 ] && run $p $aw --dim 3 --local-n 256     # p = 1: same as the size sweep
+        [ $p -ge 2 ] && run $p $aw --dim 2 --local-n 8192    # p = 1: same as strong 2D n = 8192
+    done
+done
+rm -rf "$B"
+echo "done"

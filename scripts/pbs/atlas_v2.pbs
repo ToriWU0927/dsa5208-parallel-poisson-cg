@@ -1,0 +1,17 @@
+#!/bin/bash
+# V2 / V4 on Atlas: MPI vs serial consistency for p <= 12 (development check).
+# Submit from the project directory:  qsub scripts/pbs/atlas_v2.pbs
+#PBS -N v2_mpi
+#PBS -q parallel
+#PBS -l select=1:ncpus=12:mpiprocs=12:mem=16gb
+#PBS -l walltime=00:30:00
+#PBS -j oe
+
+cd "$PBS_O_WORKDIR"
+source /app1/ebenv >/dev/null 2>&1
+module load foss/2023b Python/3.11.5-GCCcore-13.2.0 >/dev/null 2>&1
+source scripts/pbs/env_info.sh
+
+python3 -u tests/v2_mpi_consistency.py --procs 1 2 3 4 7 8 12 --max-cores 12 \
+    --launcher "mpirun -np {p} --oversubscribe --bind-to none" \
+    --out results/v2_mpi_atlas.csv

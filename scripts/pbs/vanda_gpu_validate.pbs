@@ -1,0 +1,76 @@
+#!/bin/bash
+# MPI + CUDA on ONE Vanda GPU node (2 x A40 by default; 1 GPU:
+#   qsub -N gpu_validate_g1 -l select=1:ncpus=36:ngpus=1:mpiprocs=8:mem=240gb scripts/pbs/vanda_gpu_validate.pbs):
+#   build poisson_mpi_cuda (and the serial reference with the same GCC 13.2 as foss/2023b)
+#   V3  MPI+CUDA vs serial: CUDA-aware MPI and host staging, std / single CG, auto / slab,
+#       p = 1, 2 (one rank per GPU) and 3, 4, 8 (ranks share the 2 GPUs)
+#   short timing runs (10 iterations) to plan E7 -> results/smoke/smoke_e7_g<GPUs>_<jobid>.csv (not for the report)
+# Output: results/v3_cuda_vanda_g<GPUs>_<jobid>.csv. Every job builds in its own directory
+# (build/job_<jobid>) and writes files tagged with its job id, so a 1-GPU and a 2-GPU job can
+# run at the same time without overwriting each other's binaries or results.
+# Vanda rewrites every GPU chunk to 36 cores + 240 GB (one vnode), so smaller requests do not help.
+# Every run is time-limited. Submit from the project directory:
+#   qsub scripts/pbs/vanda_gpu_validate.pbs
+#PBS -N gpu_validate
+#PBS -P personal-CHANGEME
+#PBS -l select=2:ncpus=36:ngpus=1:mpiprocs=4:mem=240gb
+#PBS -l place=pack
+#PBS -l walltime=00:30:00
+#PBS -j oe
+#PBS -k oed
+#PBS -r n
+
+cd "$PBS_O_WORKDIR"
+module load nvhpc-hpcx-cuda12/26.1 >/dev/null 2>&1
+source scripts/pbs/env_info.sh
+echo "--- GPU topology"; nvidia-smi topo -m
+NG=$(nvidia-smi -L | wc -l)
+JID=${PBS_JOBID%%.*}
+B=build/job_$JID                       # private build directory of this job
+TAG=g${NG}_$JID
+echo "--- job $JID: $NG GPU(s), build dir $B, result tag $TAG"
+NVCC=$(dirname "$(which nvc++)")/../../cuda/12.9/bin/nvcc   # CUDA 12.9 (driver supports <= 12.9)
+# (no "make | grep || exit": the exit status of a pipeline is that of its last command)
+mkdir -p build
+make cuda BUILD=$B NVCC="$NVCC" > $B.make.log 2>&1 || { cat $B.make.log; echo "build failed"; exit 1; }
+grep -v '^mkdir' $B.make.log; rm -f $B.make.log
+T="timeout --kill-after=10"
+
+# launch check (60 s); if the default PML does not work, fall back to ob1
+run_check() { $T 60 mpirun -np 2 --bind-to none ./$B/poisson_mpi_cuda --dim 3 --n 64 \
+                  --problem mms --verify --repeat 1 --header --verbose --gpu-aware "$1"; }
+echo "--- launch check"
+if ! run_check 1; then
+    echo "default PML failed -> retrying with --mca pml ob1"
+    export OMPI_MCA_pml=ob1
+    run_check 1 || { echo "launch check failed, aborting"; exit 3; }
+fi
+run_check 0 || { echo "host-staging launch check failed, aborting"; exit 3; }
+
+# serial reference: same compiler as the CPU runs (GCCcore 13.2 comes with the Python module)
+module load Python/3.11.5-GCCcore-13.2.0 >/dev/null 2>&1
+make serial BUILD=$B CXX=g++ > $B.make.log 2>&1 || { cat $B.make.log; echo "serial build failed"; exit 1; }
+rm -f $B.make.log
+export TMPDIR="$PBS_O_WORKDIR/tmp_$PBS_JOBID" && mkdir -p "$TMPDIR"
+python3 -u tests/v2_mpi_consistency.py --variant-set cuda --mpi $B/poisson_mpi_cuda --serial $B/poisson_serial \
+    --procs 1 2 3 4 8 --launcher "mpirun -np {p} --oversubscribe --bind-to none" \
+    --timeout 120 --out results/v3_cuda_vanda_${TAG}.csv
+rm -rf "$TMPDIR"
+
+echo "--- timing smoke (10 iterations)"
+OUT=results/smoke/smoke_e7_${TAG}.csv; mkdir -p results/smoke
+# (always through mpirun and time-limited: a singleton start of the HPC-X MPI hangs, Vanda 11/11)
+$T 60 mpirun -np 1 --bind-to none ./$B/poisson_mpi_cuda --dim 2 --n 8 --repeat 1 --header \
+    > $OUT.tmp || { echo "header run failed, aborting"; exit 3; }
+head -1 $OUT.tmp > $OUT; rm -f $OUT.tmp
+for spec in "--dim 3 --n 512" "--dim 2 --n 16384" "--dim 3 --local-n 256" "--dim 2 --local-n 8192"; do
+    for p in $(seq 1 $NG); do
+        for aw in 1 0; do
+            echo "  $(date +%T) p=$p aware=$aw $spec"
+            $T 120 mpirun -np $p --bind-to none ./$B/poisson_mpi_cuda $spec --problem ones \
+                --fixed-iters 10 --repeat 1 --gpu-aware $aw | tail -n +1 >> $OUT
+        done
+    done
+done
+rm -rf "$B"
+echo "done"

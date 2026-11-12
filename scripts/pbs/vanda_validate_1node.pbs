@@ -1,0 +1,28 @@
+#!/bin/bash
+# Validation on ONE exclusive Vanda CPU node (72 cores):
+#   V1  discretisation convergence order (serial)
+#   V2/V4  MPI vs serial for p = 1 ... 72, all variants
+# Submit from the project directory:  qsub scripts/pbs/vanda_validate_1node.pbs
+#PBS -N validate_1node
+#PBS -P personal-CHANGEME
+#PBS -l select=1:ncpus=72:mpiprocs=72:mem=400gb
+#PBS -l place=scatter:excl
+#PBS -l walltime=00:20:00
+#PBS -j oe
+#PBS -k oed
+#PBS -r n
+
+cd "$PBS_O_WORKDIR"
+module load foss/2023b Python/3.11.5-GCCcore-13.2.0 >/dev/null 2>&1
+source scripts/pbs/env_info.sh
+export LD_LIBRARY_PATH="/opt/pbs/lib:${LD_LIBRARY_PATH:-}"  # PBS (tm) launch of remote ranks
+export TMPDIR="$PBS_O_WORKDIR/tmp_$PBS_JOBID" && mkdir -p "$TMPDIR"
+
+python3 -u tests/v1_convergence.py --out results/v1_convergence_vanda.csv
+
+# correctness only (no timing): no core binding, so OpenMP variants are not squeezed onto one core
+python3 -u tests/v2_mpi_consistency.py --procs 1 2 3 4 7 8 12 36 64 72 --max-cores 72 \
+    --launcher "mpirun -np {p} --bind-to none" \
+    --out results/v2_mpi_vanda_1node.csv
+
+rm -rf "$TMPDIR"

@@ -1,0 +1,32 @@
+#!/bin/bash
+# Diagnose the MPI+OpenMP launch across nodes (11/11: 72 ranks x 2 threads on
+# 2 nodes with --map-by ppr:36:node:PE=2 --bind-to core hung in E6). Each try
+# is limited to 30 s. Pure MPI over 2 nodes works.
+#PBS -N diag_hybrid
+#PBS -P personal-CHANGEME
+#PBS -l select=2:ncpus=72:mpiprocs=72:mem=400gb
+#PBS -l place=scatter:excl
+#PBS -l walltime=00:15:00
+#PBS -j oe
+#PBS -k oed
+#PBS -r n
+cd "$PBS_O_WORKDIR"
+module load foss/2023b >/dev/null 2>&1
+source scripts/pbs/env_info.sh
+export LD_LIBRARY_PATH="/opt/pbs/lib:${LD_LIBRARY_PATH:-}"
+H="--hostfile $PBS_NODEFILE"
+P="./build/poisson_mpi --problem ones --repeat 1 --fixed-iters 5"
+try() { local name=$1; shift; echo "=== $name"; local t0=$SECONDS
+    timeout --kill-after=5 30 "$@" 2>&1 | tail -n 4; echo "--- rc=${PIPESTATUS[0]} $(( SECONDS - t0 ))s"; }
+export OMP_NUM_THREADS=2 OMP_PLACES=cores OMP_PROC_BIND=close
+X="-x OMP_NUM_THREADS -x OMP_PLACES -x OMP_PROC_BIND"
+try "A hostname ppr:36:node:PE=2 bind core" mpirun -np 72 $H --map-by ppr:36:node:PE=2 --bind-to core hostname
+try "B report-bindings (first lines)"     mpirun -np 4 $H --map-by ppr:2:node:PE=2 --bind-to core --report-bindings hostname
+try "C poisson 3D 64, PE=2, -x OMP"       mpirun -np 72 $H --map-by ppr:36:node:PE=2 --bind-to core $X $P --dim 3 --n 64
+try "D poisson 3D 64, PE=2, no -x"        mpirun -np 72 $H --map-by ppr:36:node:PE=2 --bind-to core $P --dim 3 --n 64
+try "E poisson 3D 64, PE=2, 1 thread"     mpirun -np 72 $H --map-by ppr:36:node:PE=2 --bind-to core -x OMP_NUM_THREADS=1 $P --dim 3 --n 64
+try "F poisson 3D 64, 4 ranks PE=2"       mpirun -np 4 $H --map-by ppr:2:node:PE=2 --bind-to core $X $P --dim 3 --n 64
+try "G poisson 3D 64, map node, bind none" mpirun -np 72 $H --map-by node --bind-to none $X $P --dim 3 --n 64
+try "H poisson 3D 64, slot:PE=2"          mpirun -np 72 $H --map-by slot:PE=2 --bind-to core $X $P --dim 3 --n 64
+try "I poisson 3D 64, PE=2, OMP_PLACES unset" env -u OMP_PLACES -u OMP_PROC_BIND mpirun -np 72 $H --map-by ppr:36:node:PE=2 --bind-to core -x OMP_NUM_THREADS $P --dim 3 --n 64
+try "J poisson 3D 512, ppr:36:node:PE=2 (E6 config)" mpirun -np 72 $H --map-by ppr:36:node:PE=2 --bind-to core $X $P --dim 3 --n 512

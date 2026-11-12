@@ -1,0 +1,55 @@
+#!/bin/bash
+# Re-runs of 11/11 after the code review, on whole, exclusive Vanda CPU nodes:
+#   1 node : V2 quick check (new code vs serial) -> diag (E2 configurations with
+#            --sync-timers 1: t_bc, t_wait) -> E6 2D (after the 2D first-touch fix)
+#   4 nodes: diag (p = 256, 288) -> E6 2D
+#   qsub -N rerun_n1 scripts/pbs/vanda_rerun.pbs
+#   qsub -N rerun_n4 -l select=4:ncpus=72:mpiprocs=72:mem=400gb -l walltime=00:20:00 scripts/pbs/vanda_rerun.pbs
+# Builds the current code in its own directory (build/job_<jobid>, -march=native on the
+# compute node), so it never touches build/ used by other jobs.
+# Output: results/v2_mpi_vanda_1node_<jobid>.csv, results/diag_vanda_n<N>.csv,
+#         results/e6_2d_vanda_n<N>.csv (a re-run of an existing file gets the job id, see run_scaling.sh)
+#PBS -N rerun
+#PBS -P personal-CHANGEME
+#PBS -l select=1:ncpus=72:mpiprocs=72:mem=400gb
+#PBS -l place=scatter:excl
+#PBS -l walltime=00:45:00
+#PBS -j oe
+#PBS -k oed
+#PBS -r n
+
+cd "$PBS_O_WORKDIR"
+module load foss/2023b Python/3.11.5-GCCcore-13.2.0 >/dev/null 2>&1
+source scripts/pbs/env_info.sh
+export LD_LIBRARY_PATH="/opt/pbs/lib:${LD_LIBRARY_PATH:-}"  # PBS (tm) launch of remote ranks
+JID=${PBS_JOBID%%.*}
+B=build/job_$JID
+NODES=$(sort -u "$PBS_NODEFILE" | wc -l)
+echo "--- job $JID: $NODES node(s), build dir $B"
+mkdir -p build
+make -j16 serial mpi BUILD=$B > $B.make.log 2>&1 || { cat $B.make.log; echo "build failed"; exit 1; }
+rm -f $B.make.log
+export EXE="$PWD/$B/poisson_mpi" SERIAL="$PWD/$B/poisson_serial"
+# per-configuration limit as in submit_scaling.sh: 600 s on one node, 300 s on more nodes
+export RUN_TIMEOUT=600; [ "$NODES" -gt 1 ] && export RUN_TIMEOUT=300
+
+if [ "$NODES" -eq 1 ]; then
+    echo "--- V2 quick check ($(date +%T))"
+    export TMPDIR="$PBS_O_WORKDIR/tmp_$PBS_JOBID" && mkdir -p "$TMPDIR"
+    # correctness only: no core binding, so OpenMP variants are not squeezed onto one core
+    python3 -u tests/v2_mpi_consistency.py --mpi "$EXE" --serial "$SERIAL" \
+        --procs 1 2 3 4 8 72 --max-cores 72 --timeout 120 \
+        --launcher "mpirun -np {p} --bind-to none" \
+        --out results/v2_mpi_vanda_1node_$JID.csv | tee v2_$JID.log
+    # (all lines go to the job output: the watchdog kills a job without output for 15 min)
+    rm -rf "$TMPDIR"
+    grep -q "OVERALL: PASS" v2_$JID.log || { echo "V2 failed, timing runs not started"; exit 4; }
+    rm -f v2_$JID.log
+fi
+
+echo "--- diag ($(date +%T))"
+ITERS=100 scripts/run_scaling.sh diag || exit $?
+echo "--- E6 2D ($(date +%T))"
+scripts/run_scaling.sh e6_2d || exit $?
+rm -rf "$B"
+echo "done ($(date +%T))"
